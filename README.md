@@ -112,8 +112,14 @@ Vale la pena tenerlas a la vista antes de sacar conclusiones:
 - **El umbral de contraste tiene piso ~2%** por la cuantización de 8 bits del
   panel. Cada ensayo registra `codeStep`: si es 0 o 1, el estímulo estaba en el
   límite de lo representable.
-- **La agudeza usa 2 ensayos por tamaño** con criterio "todo correcto, cortando
-  en la primera falla". Es una escalera corta: rápida, no clínica.
+- **La agudeza usa 2 ensayos por tamaño**, con todos los tamaños fijos (no es
+  una escalera adaptativa). El umbral es el hueco más chico con 100% de
+  aciertos en su serie; no exige que sea una racha continua desde el tamaño
+  más grande, así que un tropiezo aislado en un tamaño grueso no invalida
+  aciertos perfectos en tamaños más finos. Es rápida, no clínica: mirá
+  `acuityLadder` en el JSON si un resultado te resulta raro — ahí está el
+  detalle nivel por nivel. Lo mismo aplica al umbral de contraste, con la
+  salvedad de que ahí hay un solo ensayo por nivel (más sensible a la suerte).
 - **iOS no corre esto.** Safari no tiene WebXR y `DeviceOrientationEvent`
   necesita permiso explícito. Está pensado para Chrome en Android.
 

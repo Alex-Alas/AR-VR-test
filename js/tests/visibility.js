@@ -193,21 +193,25 @@ export function createVisibilityTest(ctx) {
       e.n++; if (r.correct) e.ok++;
       byGap.set(r.gapArcmin, e);
     }
-    // Escalera: bajamos de tamaño y cortamos en la primera falla. Tomar el
-    // acierto más chico de toda la serie sería premiar la suerte — con 4
-    // opciones, adivinar acierta 1 de cada 4 veces.
+    // La cola de ensayos es fija (todos los tamaños se corren siempre, no es
+    // una escalera adaptativa), así que el umbral es el hueco más chico con
+    // el 100% de aciertos en su serie — sin exigir que sea una racha
+    // ininterrumpida desde el tamaño más grande. Un solo tropiezo aislado en
+    // un tamaño más grueso (un toque errado, una dirección ambigua) no debe
+    // invalidar aciertos perfectos en tamaños más finos que sí se midieron.
+    // Con 4 opciones, adivinar dos de dos por pura suerte es 1/16 — igual de
+    // improbable que si exigiéramos monotonía, así que no se gana nada
+    // cortando en la primera falla.
     let acuityThreshold = null;
     for (const gap of GAPS) {
       const e = byGap.get(gap);
-      if (!e) continue;
-      if (e.ok === e.n) acuityThreshold = gap; else break;
+      if (e && e.ok === e.n) acuityThreshold = gap;
     }
     // Mismo criterio bajando el contraste.
     let contrastThreshold = null;
     for (const c of CONTRASTS) {
       const r = results.contrast.find(x => x.contrast === c);
-      if (!r) continue;
-      if (r.correct) contrastThreshold = c; else break;
+      if (r && r.correct) contrastThreshold = c;
     }
     const arcminPerPx = angularResolution();
     const summary = {
@@ -215,7 +219,7 @@ export function createVisibilityTest(ctx) {
       distanceM: DIST,
       acuityGapArcmin: acuityThreshold,
       acuityLadder: GAPS.map(g => ({ gapArcmin: g, ...(byGap.get(g) || { ok: 0, n: 0 }) })),
-      acuityCriterion: 'todas las respuestas correctas, cortando en la primera falla (4AFC)',
+      acuityCriterion: 'hueco más chico con 100% de aciertos en su serie (4AFC, sin exigir racha continua)',
       acuitySnellenEquiv: acuityThreshold ? `20/${Math.round(20 * acuityThreshold)}` : null,
       contrastThreshold,
       contrastModel: 'weber-gamma2.2',
