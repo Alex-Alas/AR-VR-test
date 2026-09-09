@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#0b0f14">
+<title>XR Test Bench</title>
+<link rel="stylesheet" href="css/style.css">
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+
+<canvas id="gl"></canvas>
+
+<div id="overlay">
+
+  <!-- ================= HOME ================= -->
+  <section id="panel-home" class="panel">
+    <header>
+      <h1>XR Test Bench</h1>
+      <p class="sub">Banco de pruebas para visor Cardboard + teléfono Android</p>
+    </header>
+
+    <div id="support" class="support"></div>
+
+    <div class="group">
+      <h2>👁️ Test 1 · Visibilidad</h2>
+      <p class="hint">Agudeza visual objetiva (anillos de Landolt), contraste, FOV y aberración cromática.</p>
+      <div class="row">
+        <button class="btn" data-go="visibility:mono">📱 En pantalla</button>
+        <button class="btn primary" data-go="visibility:stereo">🥽 En el visor</button>
+      </div>
+    </div>
+
+    <div class="group">
+      <h2>🤌 Test 2 · Precisión de manos</h2>
+      <p class="hint">Hand tracking por cámara (MediaPipe). Tarea tipo Fitts: error en mm, tiempo, jitter y pérdidas de tracking.</p>
+      <div class="row">
+        <button class="btn" data-go="hands:mono">📱 En pantalla</button>
+        <button class="btn primary" data-go="hands:stereo">🥽 En el visor</button>
+      </div>
+    </div>
+
+    <div class="group">
+      <h2>📐 Test 3 · Precisión AR</h2>
+      <p class="hint">WebXR + ARCore. Deriva del anclaje, precisión de colocación y error de escala. Se usa con el teléfono en la mano.</p>
+      <div class="row">
+        <button class="btn primary" id="btn-ar">🚀 Iniciar sesión AR</button>
+      </div>
+    </div>
+
+    <div class="group">
+      <div class="row">
+        <button class="btn ghost" data-go="calib">⚙️ Calibración del visor</button>
+        <button class="btn ghost" data-go="results">📊 Resultados</button>
+      </div>
+    </div>
+
+    <footer class="foot">
+      <span id="foot-info"></span>
+    </footer>
+  </section>
+
+  <!-- ================= CALIBRACIÓN ================= -->
+  <section id="panel-calib" class="panel hidden">
+    <header>
+      <h1>⚙️ Calibración</h1>
+      <p class="sub">Ajustá esto <b>antes</b> de meter el teléfono en el visor. Se guarda en el navegador.</p>
+    </header>
+    <div id="calib-sliders" class="sliders"></div>
+    <div class="row">
+      <button class="btn" data-go="calibpreview">👁️ Ver patrón de ajuste</button>
+      <button class="btn ghost" id="calib-reset">↺ Restaurar</button>
+      <button class="btn ghost" data-go="home">← Volver</button>
+    </div>
+  </section>
+
+  <!-- ================= RESULTADOS ================= -->
+  <section id="panel-results" class="panel hidden">
+    <header>
+      <h1>📊 Resultados</h1>
+      <p class="sub" id="results-count"></p>
+    </header>
+    <pre id="results-dump" class="dump"></pre>
+    <div class="row">
+      <button class="btn primary" id="res-download">⬇️ Descargar JSON</button>
+      <button class="btn" id="res-copy">📋 Copiar</button>
+      <button class="btn danger" id="res-clear">🗑️ Borrar</button>
+      <button class="btn ghost" data-go="home">← Volver</button>
+    </div>
+  </section>
+
+  <!-- ================= HUD (durante un test) ================= -->
+  <div id="hud" class="hud hidden">
+    <button class="btn small ghost" id="hud-exit">✕ Salir</button>
+    <span id="hud-title"></span>
+    <span id="hud-status" class="mono"></span>
+  </div>
+
+  <!-- ================= AR UI (dom-overlay) ================= -->
+  <div id="ar-ui" class="ar-ui hidden">
+    <div id="ar-msg" class="ar-msg"></div>
+    <div id="ar-actions" class="ar-actions"></div>
+  </div>
+
+  <!-- ================= CONSOLA ================= -->
+  <div id="debug" class="debug hidden"></div>
+  <button id="debug-toggle" class="debug-toggle">‹/›</button>
+
+</div>
+
+<video id="cam" playsinline muted autoplay></video>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
