@@ -50,10 +50,11 @@
 
     <div class="group">
       <h2>📐 Test 3 · Precisión AR</h2>
-      <p class="hint">WebXR + ARCore. Deriva del anclaje, precisión de colocación y error de escala. Se usa con el teléfono en la mano.</p>
+      <p class="hint">WebXR + ARCore. Deriva del anclaje, precisión de colocación y error de escala. Se usa con el teléfono en la mano. Necesita "Servicios de Google Play para RA" instalado y un teléfono certificado por ARCore.</p>
       <div class="row">
         <button class="btn primary" id="btn-ar">🚀 Iniciar sesión AR</button>
       </div>
+      <pre id="ar-diag" class="diag hidden"></pre>
     </div>
 
     <div class="group">
@@ -76,7 +77,7 @@
     </header>
     <div id="calib-sliders" class="sliders"></div>
     <div class="row">
-      <button class="btn" data-go="calibpreview">👁️ Ver patrón de ajuste</button>
+      <button class="btn" data-go="calibpreview">👁️ Ajustar dentro del visor</button>
       <button class="btn ghost" id="calib-reset">↺ Restaurar</button>
       <button class="btn ghost" data-go="home">← Volver</button>
     </div>

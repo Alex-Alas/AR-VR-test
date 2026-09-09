@@ -4,10 +4,17 @@
 //   B · Deriva: marcar el MISMO punto físico dos veces separadas por un paseo;
 //       la distancia entre las dos marcas es la deriva acumulada del tracking.
 //   C · Escala: medir algo de largo conocido y comparar con la realidad.
+//
+// Dos modos de puntería, según lo que el dispositivo conceda:
+//   'hit-test' → retícula sobre la superficie detectada (el bueno).
+//   'device'   → sin hit-test: el punto marcado es la posición del propio
+//                teléfono, así que se marca apoyándolo en el punto físico.
+//                Menos cómodo, pero deriva y escala se siguen midiendo igual.
 import * as THREE from 'three';
 import { Logger, stats } from '../logger.js';
-import { disposeTree } from '../interaction.js';
-import { arPrompt, log, el } from '../ui.js';
+import { disposeTree, makeButton } from '../interaction.js';
+import { textPanel } from '../textures.js';
+import { arPrompt, log, logWarn, el } from '../ui.js';
 
 const RING_RADII = [0.05, 0.02, 0.01];   // m
 const DRIFT_ROUNDS = 2;
@@ -41,6 +48,85 @@ export function createARTest(ctx) {
     scalePoints: [],
     results: { placement: [], drift: [], scale: [], features: {} },
   };
+
+  const hasHitTest = () => state.results.features.hitTest !== false;
+  const hasOverlay = () => state.results.features.domOverlay !== false;
+
+  /** Cómo se marca un punto, según el modo de puntería que haya. */
+  const AIM = () => hasHitTest()
+    ? 'Tocá la pantalla'
+    : 'Apoyá el borde de arriba del teléfono en el punto y tocá la pantalla';
+
+  // ---------- UI 3D de emergencia ----------
+  // Sin `dom-overlay` el DOM no se ve dentro de la sesión: la misma UI se dibuja
+  // en la escena y se maneja con mirada + dwell, que sí funciona siempre.
+  const fallbackUI = new THREE.Group();
+
+  function wrap(txt, n = 38) {
+    const out = [];
+    for (const para of txt.split('\n')) {
+      let line = '';
+      for (const word of para.split(' ')) {
+        if ((line + ' ' + word).trim().length > n) { out.push(line.trim()); line = word; }
+        else line += ' ' + word;
+      }
+      out.push(line.trim());
+    }
+    return out.filter(l => l.length);
+  }
+
+  const stripHtml = html => html.replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]+>/g, '')
+    .split('\n').map(l => l.trim().replace(/\s+/g, ' ')).join('\n');
+
+  function clearFallback() {
+    fallbackUI.children.slice().forEach(o => { fallbackUI.remove(o); disposeTree(o); });
+    ctx.interaction.setTargets([]);
+  }
+
+  /**
+   * Panel + fila de botones a 1,2 m de la cara. Las medidas no salen de
+   * `rig.fov` a propósito: en AR el FOV lo fija la cámara del dispositivo, no la
+   * configuración del visor, así que se asume un campo de ~50° verticales.
+   */
+  function paintFallback(msg, actions) {
+    clearFallback();
+    const D = 1.2, hh = D * Math.tan(25 * Math.PI / 180), hw = hh * 1.6;
+
+    const lines = wrap(stripHtml(msg));
+    const { texture, aspect } = textPanel(lines, { fontSize: 40, width: 1024, bg: '#111a25dd' });
+    const pw = 2 * hw * 0.92;
+    const panel = new THREE.Mesh(
+      new THREE.PlaneGeometry(pw, pw / aspect),
+      new THREE.MeshBasicMaterial({ map: texture, transparent: true })
+    );
+    panel.position.set(0, hh * 0.35, -D);
+    fallbackUI.add(panel);
+
+    if (!actions.length) return;
+    const metas = actions.map(a => ({ a, ...textPanel([a.label], { fontSize: 52, pad: 18, bg: '#1b2430', width: 512 }) }));
+    let bh = 2 * hh * 0.13;
+    let widths = metas.map(m => bh * m.aspect);
+    let gap = bh * 0.28;
+    let total = widths.reduce((x, y) => x + y, 0) + gap * (metas.length - 1);
+    const maxW = 2 * hw * 0.94;
+    if (total > maxW) { const k = maxW / total; bh *= k; gap *= k; widths = widths.map(w => w * k); total = maxW; }
+
+    let x = -total / 2;
+    for (let i = 0; i < metas.length; i++) {
+      const m = metas[i];
+      const b = makeButton(m.texture, widths[i], bh, () => m.a.onClick());
+      b.position.set(x + widths[i] / 2, -hh * 0.62, -D);
+      x += widths[i] + gap;
+      fallbackUI.add(b);
+    }
+    ctx.interaction.setTargets(fallbackUI.children.filter(o => o.userData.onSelect));
+  }
+
+  /** Único punto de pintado: DOM si hay overlay, 3D si no. */
+  function paint(msg, actions = []) {
+    if (hasOverlay()) return arPrompt(msg, actions);
+    paintFallback(msg, actions);
+  }
 
   // ---------- objetos ----------
   function ringAt(p, r) {
@@ -83,16 +169,19 @@ export function createARTest(ctx) {
   function goMenu() {
     state.phase = 'menu';
     clearPlaced();
-    arPrompt(
-      `<b>Test 3 · Precisión AR</b><br>Apuntá a una superficie plana con buena textura y luz.`,
-      [
-        { label: 'A · Colocación', primary: true, onClick: startPlacement },
-        { label: 'B · Deriva', onClick: startDrift },
-        { label: 'C · Escala', onClick: startScale },
-        { label: 'Ver resultados', ghost: true, onClick: showSummary },
-        { label: '✕ Salir', ghost: true, onClick: () => ctx.exit() },
-      ]
-    );
+    const intro = hasHitTest()
+      ? 'Apuntá a una superficie plana con buena textura y luz.'
+      : 'Sin hit-test: los puntos se marcan apoyando el teléfono. Movelo despacio unos segundos para que arranque el tracking.';
+    const items = [
+      { label: 'A · Colocación', primary: true, onClick: startPlacement },
+      { label: 'B · Deriva', onClick: startDrift },
+    ];
+    // La tarea C necesita escribir la medida real con cinta métrica, y sin
+    // dom-overlay no hay teclado adentro de la sesión.
+    if (hasOverlay()) items.push({ label: 'C · Escala', onClick: startScale });
+    items.push({ label: 'Ver resultados', ghost: true, onClick: showSummary });
+    items.push({ label: '✕ Salir', ghost: true, onClick: () => ctx.exit() });
+    paint(`<b>Test 3 · Precisión AR</b><br>${intro}`, items);
   }
 
   // --- A · colocación ---
@@ -104,7 +193,7 @@ export function createARTest(ctx) {
   function nextPlacementRound() {
     if (state.placeRound >= RING_RADII.length) {
       const errs = state.results.placement.map(r => r.errorMm);
-      arPrompt(`<b>Tarea A lista.</b><br>Error mediano: <b>${stats(errs)?.p50 ?? '—'} mm</b>`,
+      paint(`<b>Tarea A lista.</b><br>Error mediano: <b>${stats(errs)?.p50 ?? '—'} mm</b>`,
         [{ label: 'Volver al menú', primary: true, onClick: goMenu }]);
       return;
     }
@@ -112,8 +201,8 @@ export function createARTest(ctx) {
     state.ring = null;
     state.phase = 'place-ring';
     const r = RING_RADII[state.placeRound];
-    arPrompt(`<b>A${state.placeRound + 1} · anillo de ${(r * 1000).toFixed(0)} mm</b><br>
-      Tocá la pantalla para colocar el anillo sobre la superficie.`,
+    paint(`<b>A${state.placeRound + 1} · anillo de ${(r * 1000).toFixed(0)} mm</b><br>
+      ${AIM()} para colocar el anillo sobre la superficie.`,
       [{ label: 'Saltar', ghost: true, onClick: () => { state.placeRound++; nextPlacementRound(); } }]);
   }
 
@@ -122,7 +211,7 @@ export function createARTest(ctx) {
     state.ring = { pos: p.clone(), r, t: performance.now() };
     ringAt(p, r);
     state.phase = 'place-pin';
-    arPrompt(`Ahora <b>movete un poco</b> y tocá para poner el pin
+    paint(`Ahora <b>movete un poco</b> y marcá el pin
       lo más centrado posible en el anillo.`, []);
   }
 
@@ -142,7 +231,7 @@ export function createARTest(ctx) {
     log(`AR colocación: ${rec.errorMm} mm (anillo ${rec.ringRadiusMm} mm)`);
     state.placeRound++;
     state.phase = 'idle';
-    arPrompt(`Error: <b>${rec.errorMm} mm</b> ${rec.inside ? '✅ dentro' : '❌ fuera'} del anillo.`,
+    paint(`Error: <b>${rec.errorMm} mm</b> ${rec.inside ? '✅ dentro' : '❌ fuera'} del anillo.`,
       [{ label: 'Siguiente ▶', primary: true, onClick: nextPlacementRound }]);
   }
 
@@ -155,16 +244,16 @@ export function createARTest(ctx) {
   function nextDriftRound() {
     if (state.driftRound >= DRIFT_ROUNDS) {
       const d = state.results.drift.map(r => r.driftMm);
-      arPrompt(`<b>Tarea B lista.</b><br>Deriva mediana: <b>${stats(d)?.p50 ?? '—'} mm</b>`,
+      paint(`<b>Tarea B lista.</b><br>Deriva mediana: <b>${stats(d)?.p50 ?? '—'} mm</b>`,
         [{ label: 'Volver al menú', primary: true, onClick: goMenu }]);
       return;
     }
     clearPlaced();
     state.driftA = null;
     state.phase = 'drift-a';
-    arPrompt(`<b>B${state.driftRound + 1} · deriva del anclaje</b><br>
-      Elegí una <b>esquina física concreta</b> (la punta de una mesa, un tornillo)
-      y tocá para marcarla.`,
+    paint(`<b>B${state.driftRound + 1} · deriva del anclaje</b><br>
+      Elegí una <b>esquina física concreta</b> (la punta de una mesa, un tornillo).
+      ${AIM()} para marcarla.`,
       [{ label: 'Saltar', ghost: true, onClick: () => { state.driftRound++; nextDriftRound(); } }]);
   }
 
@@ -172,11 +261,11 @@ export function createARTest(ctx) {
     state.driftA = { pos: p.clone(), t: performance.now() };
     markerAt(p, 0x3ddc97);
     state.phase = 'drift-walk';
-    arPrompt(`Marca puesta. Ahora <b>alejate unos 5 pasos, date la vuelta y volvé</b>
+    paint(`Marca puesta. Ahora <b>alejate unos 5 pasos, date la vuelta y volvé</b>
       al mismo lugar. Cuando estés listo, tocá "Ya volví".`,
       [{ label: 'Ya volví ▶', primary: true, onClick: () => {
         state.phase = 'drift-b';
-        arPrompt(`Marcá <b>exactamente el mismo punto físico</b> otra vez.
+        paint(`Marcá <b>exactamente el mismo punto físico</b> otra vez.
           La distancia entre las dos marcas es la deriva del tracking.`, []);
       } }]);
   }
@@ -194,7 +283,7 @@ export function createARTest(ctx) {
     log(`AR deriva: ${rec.driftMm} mm en ${rec.elapsedS}s`);
     state.driftRound++;
     state.phase = 'idle';
-    arPrompt(`Deriva: <b>${rec.driftMm} mm</b> (horizontal ${rec.horizontalMm} / vertical ${rec.verticalMm})
+    paint(`Deriva: <b>${rec.driftMm} mm</b> (horizontal ${rec.horizontalMm} / vertical ${rec.verticalMm})
       tras ${rec.elapsedS} s.`,
       [{ label: 'Siguiente ▶', primary: true, onClick: nextDriftRound }]);
   }
@@ -204,8 +293,8 @@ export function createARTest(ctx) {
     clearPlaced();
     state.scalePoints = [];
     state.phase = 'scale';
-    arPrompt(`<b>C · error de escala</b><br>
-      Tocá los <b>dos extremos</b> de algo que puedas medir con cinta métrica
+    paint(`<b>C · error de escala</b><br>
+      Marcá los <b>dos extremos</b> de algo que puedas medir con cinta métrica
       (el largo de una mesa, una puerta).`, []);
   }
 
@@ -213,7 +302,7 @@ export function createARTest(ctx) {
     state.scalePoints.push(p.clone());
     markerAt(p, 0x4cc2ff, 0.008);
     if (state.scalePoints.length < 2) {
-      arPrompt(`Punto 1 puesto. Tocá el <b>segundo extremo</b>.`, []);
+      paint(`Punto 1 puesto. Marcá el <b>segundo extremo</b>.`, []);
       return;
     }
     const measured = state.scalePoints[0].distanceTo(state.scalePoints[1]);
@@ -222,7 +311,7 @@ export function createARTest(ctx) {
     input.type = 'number';
     input.step = '0.1';
     input.placeholder = 'medida real en cm';
-    arPrompt(`AR midió <b>${(measured * 100).toFixed(1)} cm</b>.<br>
+    paint(`AR midió <b>${(measured * 100).toFixed(1)} cm</b>.<br>
       Medilo con cinta y escribí el valor real:`, [
       { label: 'Guardar', primary: true, onClick: () => {
         const real = parseFloat(input.value) / 100;
@@ -235,7 +324,7 @@ export function createARTest(ctx) {
         };
         state.results.scale.push(rec);
         log(`AR escala: ${rec.errorPct}% de error`);
-        arPrompt(`Error de escala: <b>${rec.errorPct}%</b> (${rec.errorCm} cm).`,
+        paint(`Error de escala: <b>${rec.errorPct}%</b> (${rec.errorCm} cm).`,
           [{ label: 'Otra medición', onClick: startScale },
            { label: 'Volver al menú', primary: true, onClick: goMenu }]);
       } },
@@ -268,7 +357,7 @@ export function createARTest(ctx) {
       },
     };
     Logger.log('ar', summary);
-    arPrompt(`<b>Guardado.</b><br>
+    paint(`<b>Guardado.</b><br>
       Colocación: ${summary.placement.errorMm?.p50 ?? '—'} mm (mediana)<br>
       Deriva: ${summary.drift.driftMm?.p50 ?? '—'} mm<br>
       Escala: ${summary.scale.errorPct?.p50 ?? '—'} %`,
@@ -279,14 +368,30 @@ export function createARTest(ctx) {
   // ---------- API para el runner de XR ----------
   return {
     title: 'Test 3 · AR',
-    setFeatures(f) { state.results.features = f; },
 
-    /** Se llama en cada frame XR con el pose del hit-test (o null). */
-    onFrame(hitMatrix) {
-      if (hitMatrix) {
-        reticle.visible = state.phase !== 'idle' && state.phase !== 'menu' && state.phase !== 'drift-walk';
-        reticle.matrix.copy(hitMatrix);
-        state.hitPose = new THREE.Vector3().setFromMatrixPosition(hitMatrix);
+    /** @param {{domOverlay:boolean, hitTest:boolean, enabled:string[]|null}} f */
+    setFeatures(f) {
+      state.results.features = f;
+      if (f.hitTest === false) logWarn('AR sin hit-test: se marca apoyando el teléfono en el punto');
+      if (f.domOverlay === false) {
+        logWarn('AR sin dom-overlay: la UI va en 3D, se selecciona con la mirada');
+        ctx.head.add(fallbackUI);
+        ctx.interaction.setMode('gaze');
+      }
+    },
+
+    /**
+     * Se llama en cada frame XR con el pose del punto apuntado (o null).
+     * Con hit-test es el punto sobre la superficie; sin él, la posición del
+     * propio teléfono.
+     */
+    onFrame(poseMatrix) {
+      if (poseMatrix) {
+        // Sin hit-test la retícula quedaría pegada a la cara: no se dibuja.
+        reticle.visible = hasHitTest()
+          && state.phase !== 'idle' && state.phase !== 'menu' && state.phase !== 'drift-walk';
+        reticle.matrix.copy(poseMatrix);
+        state.hitPose = new THREE.Vector3().setFromMatrixPosition(poseMatrix);
         if (state.phase === 'wait-surface') goMenu();
       } else {
         reticle.visible = false;
@@ -309,13 +414,17 @@ export function createARTest(ctx) {
 
     start() {
       state.phase = 'wait-surface';
-      arPrompt('Moviendo el teléfono para encontrar una superficie…', [
+      paint(hasHitTest()
+        ? 'Moviendo el teléfono para encontrar una superficie…'
+        : 'Movete despacio unos segundos para que ARCore fije el tracking…', [
         { label: '✕ Salir', ghost: true, onClick: () => ctx.exit() },
       ]);
     },
 
     dispose() {
       clearPlaced();
+      clearFallback();
+      fallbackUI.parent?.remove(fallbackUI);
       scene.remove(root);
       disposeTree(root);
     },

@@ -18,11 +18,19 @@ export function placeNdc(obj, rig, x, y, dist) {
   obj.position.set(x * halfWidthAt(rig, dist), y * halfHeightAt(rig, dist), -dist);
 }
 
+/**
+ * Ancho utilizable en NDC. En estéreo el eje óptico está corrido hacia la nariz
+ * (ver Rig.eyeShiftNdc), así que el borde interno de cada ojo se cae de cuadro
+ * justo en esa magnitud: hay que descontarla o los botones de los extremos
+ * quedan cortados en un ojo.
+ */
+export const usableXFrac = (rig, margin = 0.94) => Math.max(0.3, margin - Math.abs(rig.eyeShiftNdc || 0));
+
 /** Fila de botones que siempre entra en pantalla, en cualquier modo. */
 export function buildButtonRow(rig, items, opt = {}) {
   const { dist = 1.6, yNdc = -0.72, hFrac = 0.13, gapFrac = 0.28, fontSize = 52 } = opt;
   const hh = halfHeightAt(rig, dist);
-  const maxW = 2 * halfWidthAt(rig, dist) * 0.94;
+  const maxW = 2 * halfWidthAt(rig, dist) * usableXFrac(rig);
 
   const metas = items.map(it => ({ it, ...textPanel([it.label], { fontSize, pad: 18, bg: '#1b2430', width: 512 }) }));
   let h = 2 * hh * hFrac;
@@ -51,7 +59,7 @@ export function buildPanel(rig, lines, opt = {}) {
   const { dist = 2.2, yNdc = 0.16, wFrac = 0.86, maxHFrac = 0.52, fontSize = 42 } = opt;
   const hh = halfHeightAt(rig, dist);
   const { texture, aspect } = textPanel(lines, { fontSize, width: 1024, bg: '#111a25' });
-  let w = 2 * halfWidthAt(rig, dist) * wFrac;
+  let w = 2 * halfWidthAt(rig, dist) * Math.min(wFrac, usableXFrac(rig, 0.98));
   let h = w / aspect;
   const maxH = 2 * hh * maxHFrac;
   if (h > maxH) { h = maxH; w = h * aspect; }

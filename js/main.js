@@ -1,14 +1,14 @@
 // Orquestador: renderer, cambio de modo, sesión WebXR y paneles DOM.
 import * as THREE from 'three';
-import { config, setConfig, resetConfig, SCHEMA } from './config.js';
+import { config, setConfig, nudgeConfig, resetConfig, SCHEMA } from './config.js';
 import { Logger } from './logger.js';
-import { Rig } from './stereo.js';
+import { Rig, LAYER_LEFT, LAYER_RIGHT } from './stereo.js';
 import { Interaction, disposeTree } from './interaction.js';
 import { HeadTracker } from './orientation.js';
 import { CameraFeed } from './camerafeed.js';
 import { HandTracker } from './hands.js';
-import { calibrationGrid } from './textures.js';
-import { buildButtonRow } from './layout.js';
+import { calibrationGrid, textPanel } from './textures.js';
+import { buildButtonRow, halfHeightAt } from './layout.js';
 import { createVisibilityTest } from './tests/visibility.js';
 import { createHandTest } from './tests/handprecision.js';
 import { createARTest } from './tests/arprecision.js';
@@ -77,6 +77,9 @@ renderer.setAnimationLoop((t, frame) => {
 
   if (mode === 'ar') {
     updateAR(frame);
+    // Sin dom-overlay la UI de AR es 3D y se selecciona con la mirada: el dwell
+    // necesita que el bucle de interacción corra también acá.
+    interaction.update(dt);
     renderer.render(scene, head);
     return;
   }
@@ -167,15 +170,98 @@ async function stopTest(silent = false) {
   }
 }
 
-// ---------------------------------------------------------------- vista previa de calibración
+// ---------------------------------------------------------------- ajuste del visor
+// Patrón de ajuste con dos partes:
+//   · rejilla a pantalla completa, para k1/k2 y aberración cromática;
+//   · blanco de fusión binocular con marcas monoculares (tipo nonius) para
+//     ajustar la separación de las dos imágenes, que es el parámetro que decide
+//     si la imagen fusiona o se ve doble.
+// Los controles están adentro del visor a propósito: sacar el teléfono, mover un
+// slider y volver a meterlo hace imposible converger.
+const FUSION_DIST = 6;                                   // casi infinito: paralaje despreciable
+const angSize = (deg, dist) => 2 * dist * Math.tan(deg * Math.PI / 360);
+
+/** Material plano que ignora el z-buffer: el blanco va SIEMPRE sobre la rejilla. */
+function overlayMat(opt) {
+  return new THREE.MeshBasicMaterial({ depthTest: false, depthWrite: false, ...opt });
+}
+
 function createCalibPreview(c) {
   const root = new THREE.Group();
+  const overlay = new THREE.Group();       // todo lo que va por encima de la rejilla
+  let readout = null;
+
+  const ang = deg => angSize(deg, FUSION_DIST);
+
+  /** Barra vertical que ve un solo ojo, centrada a `yDeg` grados del centro. */
+  function bar(color, yDeg, layer) {
+    const m = new THREE.Mesh(
+      new THREE.PlaneGeometry(ang(0.7), ang(4.5)),
+      overlayMat({ color })
+    );
+    m.position.set(0, Math.sign(yDeg) * ang(Math.abs(yDeg)) / 2, -FUSION_DIST);
+    m.renderOrder = 12;
+    m.layers.set(layer);
+    return m;
+  }
+
+  /**
+   * Blanco de fusión. El disco y el anillo los ven los dos ojos y sirven de
+   * candado de convergencia; las dos barras las ve un ojo cada una. Si la
+   * separación de imágenes es la correcta, naranja y verde caen en la misma
+   * vertical. Si no, se ven corridas, y cuánto se corren dice cuánto falta.
+   */
+  function fusionTarget() {
+    const g = new THREE.Group();
+    // Opaco a propósito: three dibuja TODO lo transparente después de lo opaco,
+    // así que un disco translúcido terminaría pintado encima del anillo y de las
+    // barras por más renderOrder que se les ponga, y se verían apagados.
+    const disc = new THREE.Mesh(
+      new THREE.CircleGeometry(ang(26) / 2, 64),
+      overlayMat({ color: 0x05080c })
+    );
+    const ring = new THREE.Mesh(
+      new THREE.RingGeometry(ang(11) / 2, ang(12) / 2, 64),
+      overlayMat({ color: 0x4cc2ff })
+    );
+    const dot = new THREE.Mesh(
+      new THREE.CircleGeometry(ang(0.7) / 2, 16),
+      overlayMat({ color: 0xffffff })
+    );
+    disc.renderOrder = 10; ring.renderOrder = 11; dot.renderOrder = 12;
+    for (const m of [disc, ring, dot]) m.position.z = -FUSION_DIST;
+    g.add(disc, ring, dot, bar(0xffb454, 8.5, LAYER_LEFT), bar(0x3ddc97, -8.5, LAYER_RIGHT));
+    return g;
+  }
+
+  function paintReadout() {
+    if (readout) { overlay.remove(readout); disposeTree(readout); }
+    const { texture, aspect } = textPanel([
+      `separación ${config.imgSep.toFixed(1)} %   ·   k1 ${config.k1.toFixed(2)}`,
+      'naranja arriba y verde abajo, en UNA sola línea vertical',
+      'las rectas rectas, los círculos redondos',
+    ], { fontSize: 34, width: 1024, bg: '#0d1420ee' });
+    // En NDC y no en grados: si el FOV configurado no coincide con el real, el
+    // texto tiene que seguir entrando en pantalla igual.
+    const D = 1.6;
+    const hh = halfHeightAt(c.rig, D);
+    const w = Math.min(angSize(34, D), 2 * hh * c.rig.viewAspect * 0.9);
+    readout = new THREE.Mesh(
+      new THREE.PlaneGeometry(w, w / aspect),
+      overlayMat({ map: texture, transparent: true })
+    );
+    readout.renderOrder = 13;
+    readout.position.set(0, hh * 0.78, -D);
+    overlay.add(readout);
+  }
+
   return {
-    title: 'Vista previa de calibración',
+    title: 'Ajuste del visor',
     needsCamera: false,
     usesPassthrough: false,
     init() {
       c.scene.add(root);
+      root.add(overlay);
       // La rejilla llena el campo entero: los bordes son justo lo que hay que juzgar.
       const side = 2 * 2 * Math.tan(c.rig.fov * Math.PI / 360);
       const grid = new THREE.Mesh(
@@ -184,10 +270,29 @@ function createCalibPreview(c) {
       );
       grid.position.set(0, 0, -2);
       root.add(grid);
-      const btns = buildButtonRow(c.rig, [{ label: 'Salir ✕', onSelect: () => c.exit() }],
-        { dist: 1.4, yNdc: -0.84, hFrac: 0.11 });
-      btns.forEach(b => root.add(b));
-      c.interaction.setTargets(btns);
+      overlay.add(fusionTarget());
+      paintReadout();
+
+      const nudge = (k, d) => () => { nudgeConfig(k, d); c.rig.syncCameraParams(); paintReadout(); refreshFoot(); };
+      const rows = [
+        [{ label: '◀ juntar', onSelect: nudge('imgSep', -0.5) },
+         { label: 'separar ▶', onSelect: nudge('imgSep', +0.5) }],
+        [{ label: 'k1 −', onSelect: nudge('k1', -0.01) },
+         { label: 'k1 +', onSelect: nudge('k1', +0.01) },
+         { label: 'Salir ✕', onSelect: () => c.exit() }],
+      ];
+      const targets = [];
+      rows.forEach((items, i) => {
+        buildButtonRow(c.rig, items, { dist: 1.4, yNdc: i === 0 ? -0.52 : -0.82, hFrac: 0.1 })
+          .forEach((b, j) => {
+            // Ajustar de a 0,5% a 1,2 s por paso sería eterno: los botones que
+            // repiten se disparan mucho más rápido. El de salir, no: es el único
+            // que no se puede deshacer mirando para otro lado.
+            if (items[j].label !== 'Salir ✕') b.userData.dwellScale = 0.3;
+            root.add(b); targets.push(b);
+          });
+      });
+      c.interaction.setTargets(targets);
     },
     update() {},
     dispose() { c.scene.remove(root); disposeTree(root); },
@@ -198,24 +303,111 @@ function createCalibPreview(c) {
 // Un toque sobre la UI del overlay no debe contar como "select" del mundo AR.
 el.overlay.addEventListener('beforexrselect', ev => ev.preventDefault());
 
+// Un solo feature no soportado hace fallar TODA la sesión con el mismo mensaje
+// genérico ("The specified session configuration is not supported"), sin decir
+// cuál. La única forma de averiguarlo —y de arrancar igual sin él— es probar de
+// la configuración más completa a la más pobre y anotar qué falló en cada paso.
+//
+// `local` NO va en requiredFeatures: la spec ya lo garantiza en toda sesión
+// inmersiva, y pedirlo explícitamente solo agrega una forma más de fallar.
+const AR_TRIES = [
+  { name: 'completa',     required: ['hit-test'], optional: ['dom-overlay', 'anchors', 'light-estimation'], overlay: true },
+  { name: 'sin extras',   required: ['hit-test'], optional: ['dom-overlay'], overlay: true },
+  { name: 'sin overlay',  required: ['hit-test'], optional: [], overlay: false },
+  { name: 'sin hit-test', required: [], optional: ['dom-overlay', 'hit-test'], overlay: true },
+  { name: 'mínima',       required: [], optional: [], overlay: false },
+];
+
+// Solo estos dos errores significan "esta combinación de features no va". Con
+// cualquier otro (permiso denegado, sesión ya activa, contexto inseguro) probar
+// otra configuración no cambia nada y encima le vuelve a saltar el diálogo al
+// usuario, así que se corta ahí.
+const AR_RETRYABLE = new Set(['NotSupportedError', 'TypeError']);
+
+// Un rechazo por features no soportadas es inmediato. Si tardó más que esto,
+// hubo un diálogo de por medio (instalar ARCore, permiso de cámara) y el usuario
+// lo cerró: reintentar solo se lo vuelve a tirar por la cara.
+const AR_DIALOG_MS = 3000;
+
+async function requestARSession() {
+  const tried = [];
+  for (const [i, t] of AR_TRIES.entries()) {
+    const init = { requiredFeatures: t.required, optionalFeatures: t.optional };
+    if (t.overlay) init.domOverlay = { root: el.overlay };
+    const t0 = performance.now();
+    try {
+      const session = await navigator.xr.requestSession('immersive-ar', init);
+      if (i > 0) logWarn(`AR: arrancó recién con la configuración "${t.name}"`);
+      return { session, tried };
+    } catch (e) {
+      const ms = Math.round(performance.now() - t0);
+      tried.push({ name: t.name, kind: e.name, ms, msg: `${e.name}: ${e.message} (${ms} ms)` });
+      logWarn(`AR "${t.name}" falló en ${ms} ms · ${e.name}: ${e.message}`);
+      if (!AR_RETRYABLE.has(e.name)) break;
+      if (ms > AR_DIALOG_MS) { logWarn('AR: el rechazo tardó demasiado, parece un diálogo cancelado; no se reintenta'); break; }
+    }
+  }
+  return { session: null, tried };
+}
+
+/** Traduce los errores de requestSession a algo accionable. */
+function arDiagnosis(tried, supported) {
+  const kinds = new Set(tried.map(t => t.kind));
+  const out = [];
+
+  if (!window.isSecureContext) {
+    out.push('La página no está en un contexto seguro. WebXR solo funciona sobre HTTPS o en localhost.');
+  } else if (kinds.has('SecurityError')) {
+    out.push('El navegador bloqueó la sesión por permisos. Si abriste la página dentro de otra app (Instagram, WhatsApp, un iframe), abrila directo en Chrome.');
+  } else if (kinds.has('NotAllowedError')) {
+    out.push('Se denegó el permiso. Chrome pide cámara para AR y, si hace falta, instalar o actualizar "Servicios de Google Play para RA". Volvé a intentar y aceptá los dos diálogos.');
+  } else if (kinds.has('InvalidStateError')) {
+    out.push('Ya hay otra sesión XR abierta. Cerrá la otra pestaña o reiniciá Chrome.');
+  } else if (tried.some(t => t.ms > AR_DIALOG_MS)) {
+    out.push('El intento tardó varios segundos antes de fallar: casi seguro se abrió un diálogo (instalar "Servicios de Google Play para RA", o el permiso de cámara) y se canceló. Volvé a tocar el botón y aceptá lo que pida.');
+  } else if (supported === false) {
+    out.push('Este navegador dice que no soporta immersive-ar. Hace falta Chrome (no Firefox, no Samsung Internet viejo) en Android.');
+  } else {
+    // Caso típico: isSessionSupported() dice true porque el teléfono PODRÍA
+    // soportarlo, y recién requestSession() descubre que ARCore no está.
+    out.push('Chrome dice que el dispositivo podría soportar AR, pero la sesión no arranca. Casi siempre es ARCore:');
+    out.push('1. Instalá o actualizá "Servicios de Google Play para RA" desde Play Store.');
+    out.push('2. Abrí esa app una vez para que termine de configurarse.');
+    out.push('3. Verificá que tu teléfono esté en la lista de dispositivos certificados de ARCore (developers.google.com/ar/devices). Muchos gama de entrada NO lo están, y ahí no hay nada que hacer desde la web.');
+    out.push('4. Actualizá Chrome; hit-test necesita Chrome 81 o más nuevo.');
+  }
+
+  out.push('');
+  out.push('Detalle de los intentos:');
+  tried.forEach(t => out.push(`  · ${t.name} → ${t.msg}`));
+  out.push(`isSessionSupported('immersive-ar') = ${supported}`);
+  out.push(`secureContext = ${window.isSecureContext} · navigator.xr = ${!!navigator.xr}`);
+  out.push(navigator.userAgent);
+  return out.join('\n');
+}
+
+function showARDiagnosis(text) {
+  const box = document.querySelector('#ar-diag');
+  box.textContent = text;
+  box.classList.remove('hidden');
+  box.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  logErr('AR no arrancó — ver el diagnóstico en la pantalla de inicio');
+}
+
 async function startAR() {
-  if (!navigator.xr) return alert('Este navegador no tiene WebXR. Usá Chrome en Android.');
-  let supported = false;
-  try { supported = await navigator.xr.isSessionSupported('immersive-ar'); } catch {}
-  if (!supported) {
-    return alert('immersive-ar no está disponible.\n\nNecesitás Chrome en Android con "Servicios de Google Play para RA" (ARCore) instalado.');
+  document.querySelector('#ar-diag').classList.add('hidden');
+  if (!navigator.xr) {
+    return showARDiagnosis('Este navegador no expone navigator.xr, así que no tiene WebXR.\n\n'
+      + 'Hace falta Chrome en Android. Safari/iOS no tiene WebXR y no hay forma de habilitarlo.\n\n'
+      + navigator.userAgent);
   }
 
   await stopTest(true);
-  let session;
-  try {
-    session = await navigator.xr.requestSession('immersive-ar', {
-      requiredFeatures: ['hit-test', 'local'],
-      optionalFeatures: ['dom-overlay', 'anchors', 'light-estimation', 'local-floor'],
-      domOverlay: { root: el.overlay },
-    });
-  } catch (e) {
-    return alert('No se pudo iniciar AR: ' + e.message);
+  const { session, tried } = await requestARSession();
+  if (!session) {
+    let supported = null;
+    try { supported = await navigator.xr.isSessionSupported('immersive-ar'); } catch {}
+    return showARDiagnosis(arDiagnosis(tried, supported));
   }
 
   arSession = session;
@@ -224,35 +416,67 @@ async function startAR() {
   scene.background = null;
   renderer.xr.enabled = true;
   renderer.setClearAlpha(0);
-  await renderer.xr.setSession(session);
+
+  // three.js pide 'local-floor' por defecto, y la spec solo garantiza 'viewer' y
+  // 'local' en una sesión inmersiva: si el dispositivo no concedió local-floor,
+  // setSession() explota DESPUÉS de haber abierto la sesión y queda todo colgado.
+  // Acá alcanza con 'local' — se miden distancias entre puntos marcados, no
+  // alturas contra el piso.
+  renderer.xr.setReferenceSpaceType('local');
+  try {
+    await renderer.xr.setSession(session);
+  } catch (e) {
+    logErr('setSession: ' + e.message);
+    await session.end().catch(() => {});
+    return showARDiagnosis('La sesión AR se abrió pero el renderer no pudo engancharla:\n\n'
+      + `${e.name}: ${e.message}\n\n` + navigator.userAgent);
+  }
+
+  // `enabledFeatures` es lo único que dice qué concedió de verdad el navegador;
+  // los viejos no lo exponen, así que ahí se prueba y se ve qué pasa.
+  const enabled = session.enabledFeatures ? [...session.enabledFeatures] : null;
+  const viewerSpace = await session.requestReferenceSpace('viewer');
+  hitTestSource = null;
+  if (!enabled || enabled.includes('hit-test')) {
+    try { hitTestSource = await session.requestHitTestSource({ space: viewerSpace }); }
+    catch (e) { logWarn('sin hit-test: ' + e.message); }
+  }
 
   const test = createARTest(ctx);
   currentTest = test;
   test.setFeatures({
     domOverlay: !!session.domOverlayState,
-    enabled: session.enabledFeatures ? [...session.enabledFeatures] : null,
+    hitTest: !!hitTestSource,
+    enabled,
   });
-
-  const viewerSpace = await session.requestReferenceSpace('viewer');
-  hitTestSource = await session.requestHitTestSource({ space: viewerSpace });
 
   session.addEventListener('select', () => { try { test.onSelect(); } catch (e) { logErr('select: ' + e.message); } });
   session.addEventListener('end', onARend);
 
   showAR();
   test.start();
-  logOk('sesión AR iniciada');
+  logOk(`sesión AR iniciada · features: ${enabled ? enabled.join(', ') : 'no informadas'}`);
 }
 
 function updateAR(frame) {
-  if (!frame || !hitTestSource || !currentTest?.onFrame) return;
+  if (!frame || !currentTest?.onFrame) return;
   const refSpace = renderer.xr.getReferenceSpace();
-  const results = frame.getHitTestResults(hitTestSource);
-  if (results.length) {
-    const pose = results[0].getPose(refSpace);
-    if (pose) { hitMatrix.fromArray(pose.transform.matrix); currentTest.onFrame(hitMatrix); return; }
+  if (!refSpace) return;
+
+  if (hitTestSource) {
+    const results = frame.getHitTestResults(hitTestSource);
+    const pose = results.length ? results[0].getPose(refSpace) : null;
+    if (pose) hitMatrix.fromArray(pose.transform.matrix);
+    return currentTest.onFrame(pose ? hitMatrix : null);
   }
-  currentTest.onFrame(null);
+
+  // Sin hit-test el punto apuntado es la posición del propio teléfono: se marca
+  // apoyándolo contra el punto físico. Es menos cómodo, pero la deriva y la
+  // escala se miden igual de bien porque solo dependen del tracking 6DOF.
+  const viewer = frame.getViewerPose(refSpace);
+  if (!viewer) return currentTest.onFrame(null);
+  hitMatrix.fromArray(viewer.transform.matrix);
+  currentTest.onFrame(hitMatrix);
 }
 
 function onARend() {
@@ -262,6 +486,8 @@ function onARend() {
   renderer.setClearAlpha(1);
   mode = 'idle';
   if (currentTest) { try { currentTest.dispose(); } catch {} currentTest = null; }
+  interaction.setTargets([]);
+  interaction.setMode('touch');
   scene.background = new THREE.Color(0x0a0f16);
   resize();
   goHome();
@@ -275,7 +501,7 @@ document.querySelectorAll('[data-go]').forEach(b => {
   b.addEventListener('click', () => {
     const [kind, pres] = b.dataset.go.split(':');
     if (kind === 'home') return goHome();
-    if (kind === 'calib') return showPanel('calib');
+    if (kind === 'calib') { buildCalib(); return showPanel('calib'); }
     if (kind === 'results') return renderResults();
     if (kind === 'calibpreview') return startTest('calibpreview', 'stereo');
     startTest(kind, pres || 'mono');
@@ -381,7 +607,7 @@ async function detectSupport() {
 function refreshFoot() {
   const px = Math.round(window.innerHeight * (window.devicePixelRatio || 1));
   document.querySelector('#foot-info').textContent =
-    `${Logger.records.length} registros · ${px}px vert. · IPD ${config.ipd}mm · FOV ${config.fov}° · sesión ${Logger.session.id}`;
+    `${Logger.records.length} registros · ${px}px vert. · sep ${config.imgSep}% · IPD ${config.ipd}mm · FOV ${config.fov}° · sesión ${Logger.session.id}`;
 }
 
 // Gancho de inspección: dentro del visor no hay devtools, y para depurar la
