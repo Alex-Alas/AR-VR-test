@@ -1,14 +1,23 @@
 // Render mono o estéreo.
 //
-// Dos decisiones que importan para que las mediciones signifiquen algo:
+// Tres decisiones que importan para que las mediciones signifiquen algo:
 //  1. Trabajamos en valores de display crudos (ColorManagement apagado en main.js).
 //     Si three convierte a lineal y de vuelta, un gris 128 deja de ser 128 y el
 //     test de contraste mide la gestión de color de three, no la pantalla.
 //  2. El passthrough se dibuja con un quad propio en vez de scene.background,
 //     para controlar exactamente el recorte y que el cursor de la mano caiga
 //     donde el ojo ve el dedo.
+//  3. Cada ojo se renderiza con un frustum DESCENTRADO, de modo que el "adelante"
+//     de la cámara caiga sobre el centro de la lente y no sobre el centro de la
+//     media pantalla. Ver la nota larga en `eyeShiftNdc`: sin esto la imagen no
+//     fusiona en ningún teléfono cuya pantalla sea más ancha que la separación
+//     de las lentes, que son casi todos.
 import * as THREE from 'three';
 import { config } from './config.js';
+
+/** Capas para contenido monocular (tests de alineación). */
+export const LAYER_LEFT = 1;
+export const LAYER_RIGHT = 2;
 
 const QUAD_VERT = /* glsl */`
 varying vec2 vUv;
@@ -52,12 +61,15 @@ void main(){
 }
 `;
 
+// uShift desplaza el passthrough igual que el frustum descentrado desplaza la
+// escena 3D. Si no, el fondo de cámara y el cursor de la mano se separarían
+// justo en la magnitud del descentrado.
 const BG_FRAG = /* glsl */`
 precision mediump float;
 uniform sampler2D tSrc;
-uniform vec2 uRepeat, uOffset;
+uniform vec2 uRepeat, uOffset, uShift;
 varying vec2 vUv;
-void main(){ gl_FragColor = vec4(texture2D(tSrc, vUv * uRepeat + uOffset).rgb, 1.0); }
+void main(){ gl_FragColor = vec4(texture2D(tSrc, (vUv - uShift) * uRepeat + uOffset).rgb, 1.0); }
 `;
 
 function fullscreenQuad(material) {
@@ -76,7 +88,11 @@ export class Rig {
     this.w = 1; this.h = 1;
 
     this.eyeCams = [new THREE.PerspectiveCamera(), new THREE.PerspectiveCamera()];
+    this.eyeCams[0].layers.enable(LAYER_LEFT);
+    this.eyeCams[1].layers.enable(LAYER_RIGHT);
     this.monoCam = new THREE.PerspectiveCamera(70, 1, 0.01, 200);
+    this.monoCam.layers.enable(LAYER_LEFT);
+    this.monoCam.layers.enable(LAYER_RIGHT);
     this.targets = [null, null];
     this.quadCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 
@@ -98,6 +114,7 @@ export class Rig {
         tSrc: { value: null },
         uRepeat: { value: new THREE.Vector2(1, 1) },
         uOffset: { value: new THREE.Vector2(0, 0) },
+        uShift:  { value: new THREE.Vector2(0, 0) },
       },
     });
     this.bgQuad = fullscreenQuad(this.bgMat);
@@ -148,6 +165,27 @@ export class Rig {
     return 2 * Math.atan((config.screenH / 2) / config.viewDist) * 180 / Math.PI;
   }
 
+  /**
+   * Cuánto hay que correr el eje óptico de cada ojo, en NDC del medio viewport
+   * (positivo = hacia adentro, hacia la nariz), para que caiga sobre el centro
+   * de la lente.
+   *
+   * El ojo mira a través del centro de su lente: lo que ve "de frente" es el
+   * píxel que está sobre el eje de la lente, no el píxel del centro de su media
+   * pantalla. Con un teléfono de 140 mm de ancho los centros de las dos medias
+   * pantallas quedan a 70 mm, pero las lentes están a 63 mm: cada imagen queda
+   * 3,5 mm más afuera de lo que debería. A través de una lente de ~40 mm de
+   * focal eso son ~5° de divergencia por ojo, y el ojo tolera menos de 1°. La
+   * imagen no fusiona por más que la IPD y la distorsión estén perfectas.
+   *
+   * `imgSep` es la separación entre los dos centros de imagen en % del ancho
+   * total; 50% deja cada imagen centrada en su media pantalla (el caso roto).
+   */
+  get eyeShiftNdc() {
+    if (this.mode !== 'stereo') return 0;
+    return THREE.MathUtils.clamp(1 - config.imgSep / 50, -0.6, 0.6);
+  }
+
   syncCameraParams() {
     this.monoCam.fov = this.fov;
     this.monoCam.aspect = this.viewAspect;
@@ -156,11 +194,26 @@ export class Rig {
     this.monoCam.updateProjectionMatrix();
   }
 
-  _renderEye(scene, cam) {
+  /** Proyección con el eje óptico corrido `shift` en NDC horizontal. */
+  _setEyeProjection(cam, shift) {
+    const near = cam.near, far = cam.far;
+    const top = near * Math.tan(THREE.MathUtils.DEG2RAD * 0.5 * cam.fov);
+    const width = 2 * top * cam.aspect;
+    // (izq+der)/(der-izq) tiene que valer -shift para que el punto de fuga caiga
+    // en NDC x = shift; eso equivale a correr el frustum entero -shift*ancho/2.
+    const left = -width / 2 - shift * width / 2;
+    cam.projectionMatrix.makePerspective(left, left + width, top, -top, near, far);
+    cam.projectionMatrixInverse.copy(cam.projectionMatrix).invert();
+  }
+
+  _renderEye(scene, cam, shift = 0) {
     const r = this.renderer;
     r.autoClear = false;
     r.clear(true, true, true);
-    if (this.passthrough) r.render(this.bgQuad.scene, this.quadCam);
+    if (this.passthrough) {
+      this.bgMat.uniforms.uShift.value.set(shift / 2, 0);
+      r.render(this.bgQuad.scene, this.quadCam);
+    }
     r.render(scene, cam);
     r.autoClear = true;
   }
@@ -179,15 +232,17 @@ export class Rig {
     head.updateMatrixWorld();
     const ipdM = config.ipd / 1000;
     const right = new THREE.Vector3(1, 0, 0).applyQuaternion(head.quaternion);
+    const shift = this.eyeShiftNdc;
 
     for (let i = 0; i < 2; i++) {
+      const sign = i === 0 ? 1 : -1;             // el ojo izquierdo mira hacia la derecha
       const cam = this.eyeCams[i];
       cam.fov = this.fov;
       cam.aspect = this.viewAspect;
       cam.near = 0.01; cam.far = 200;
-      cam.position.copy(head.position).addScaledVector(right, (i === 0 ? -1 : 1) * ipdM / 2);
+      cam.position.copy(head.position).addScaledVector(right, -sign * ipdM / 2);
       cam.quaternion.copy(head.quaternion);
-      cam.updateProjectionMatrix();
+      this._setEyeProjection(cam, sign * shift);
       cam.updateMatrixWorld(true);
 
       // Ojo: setViewport() toma píxeles CSS y three los multiplica por el pixel
@@ -195,10 +250,10 @@ export class Rig {
       // deja el viewport en el tamaño real del target.
       r.setRenderTarget(this.targets[i]);
       r.setScissorTest(false);
-      this._renderEye(scene, cam);
+      this._renderEye(scene, cam, sign * shift);
     }
 
-    // composición con pre-distorsión de barril
+    // composición con pre-distorsión de barril, centrada en la lente
     r.setRenderTarget(null);
     r.setScissorTest(true);
     const u = this.distortMat.uniforms;
@@ -207,15 +262,15 @@ export class Rig {
     u.uChroma.value = config.chroma;
     u.uAspect.value = this.viewAspect;
     u.uEnabled.value = config.distortion ? 1 : 0;
-    const off = config.lensSep / 100;
 
     r.autoClear = false;
     for (let i = 0; i < 2; i++) {
+      const sign = i === 0 ? 1 : -1;
       const x = i === 0 ? 0 : this.w / 2;
       r.setViewport(x, 0, this.w / 2, this.h);
       r.setScissor(x, 0, this.w / 2, this.h);
       u.tSrc.value = this.targets[i].texture;
-      u.uCenter.value.set(i === 0 ? 0.5 - off : 0.5 + off, 0.5);
+      u.uCenter.value.set(0.5 + sign * shift / 2, 0.5);
       r.render(this.distortQuad.scene, this.quadCam);
     }
     r.autoClear = true;

@@ -107,7 +107,9 @@ export class Interaction {
 
     if (this.hovered && this.hovered.userData?.noDwell !== true) {
       this.dwell += dt;
-      const need = Math.max(0.2, config.dwell);
+      // `dwellScale` deja que un botón que repite (los ± de calibración) se
+      // dispare mucho más rápido que uno de navegación, sin tocar la config.
+      const need = Math.max(0.2, config.dwell * (this.hovered.userData?.dwellScale ?? 1));
       this._setProgress(Math.min(1, this.dwell / need));
       if (this.dwell >= need) {
         this.dwell = 0;

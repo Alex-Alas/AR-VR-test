@@ -3,9 +3,9 @@ const KEY = 'xrbench.calib.v1';
 
 export const SCHEMA = [
   { k:'ipd',        label:'IPD (separación de ojos)', min:52, max:76, step:0.5, val:63, unit:'mm',
-    desc:'Distancia interpupilar. Mide la tuya o probá hasta que las dos imágenes fusionen sin esfuerzo.' },
-  { k:'lensSep',    label:'Separación de centros de lente', min:0, max:20, step:0.5, val:0, unit:'% ancho',
-    desc:'Desplaza el centro de cada media pantalla hacia afuera. Si ves viñeteo asimétrico, ajustá acá.' },
+    desc:'Distancia interpupilar. Solo afecta la paralaje entre los dos ojos, no la fusión.' },
+  { k:'imgSep',     label:'Separación de las dos imágenes', min:25, max:62, step:0.5, val:45, unit:'% ancho',
+    desc:'LO PRIMERO que hay que ajustar: distancia entre los centros de las dos imágenes, en % del ancho TOTAL de la pantalla. Tiene que dar igual a la separación entre los centros de tus lentes. Cuenta: separación de lentes ÷ ancho de pantalla × 100 (63 mm ÷ 140 mm ≈ 45%). Si la ponés en 50% cada imagen queda centrada en su media pantalla y en casi ningún teléfono fusiona.' },
   { k:'fov',        label:'FOV vertical de render', min:40, max:110, step:1, val:80, unit:'°',
     desc:'FOV con el que se renderiza cada ojo. Subilo si el patrón de ajuste se ve recortado.' },
   { k:'k1',         label:'Distorsión k1', min:-0.6, max:0.8, step:0.01, val:0.22, unit:'',
@@ -19,7 +19,7 @@ export const SCHEMA = [
   { k:'dwell',      label:'Tiempo de dwell (mirada)', min:0.4, max:3, step:0.1, val:1.2, unit:'s',
     desc:'Cuánto hay que mantener la mirada sobre un botón para activarlo dentro del visor.' },
   { k:'screenH',    label:'Alto físico de la pantalla', min:5, max:20, step:0.1, val:14, unit:'cm',
-    desc:'Medilo con una regla (lado corto del área visible). Sin esto, los grados del modo pantalla son inventados.' },
+    desc:'Medilo con una regla, en la posición en la que sostenés el teléfono para el modo pantalla (con el teléfono vertical es el lado largo). Sin esto, los grados del modo pantalla son inventados.' },
   { k:'viewDist',   label:'Distancia de visión en mano', min:15, max:60, step:1, val:30, unit:'cm',
     desc:'A qué distancia sostenés el teléfono en el modo pantalla. Define el FOV equivalente.' },
   { k:'distortion', label:'Distorsión activada', min:0, max:1, step:1, val:1, unit:'0/1',
@@ -28,9 +28,22 @@ export const SCHEMA = [
 
 const defaults = Object.fromEntries(SCHEMA.map(s => [s.k, s.val]));
 
+/**
+ * `lensSep` (v1 temprana) desplazaba el centro de distorsión hacia afuera desde
+ * el centro de cada media pantalla, con 0 = centrado. Es el mismo grado de
+ * libertad que `imgSep`, con otro origen: imgSep% = 50 + lensSep.
+ */
+function migrate(raw) {
+  if (raw.imgSep === undefined && typeof raw.lensSep === 'number') {
+    raw.imgSep = 50 + raw.lensSep;
+  }
+  delete raw.lensSep;
+  return raw;
+}
+
 function load() {
   try {
-    const raw = JSON.parse(localStorage.getItem(KEY) || '{}');
+    const raw = migrate(JSON.parse(localStorage.getItem(KEY) || '{}'));
     return { ...defaults, ...raw };
   } catch { return { ...defaults }; }
 }
@@ -40,6 +53,15 @@ export const config = load();
 export function setConfig(k, v) {
   config[k] = v;
   try { localStorage.setItem(KEY, JSON.stringify(config)); } catch {}
+}
+
+/** Igual que setConfig, pero recorta al rango del slider. Para los ajustes en visor. */
+export function nudgeConfig(k, delta) {
+  const s = SCHEMA.find(x => x.k === k);
+  if (!s) return config[k];
+  const v = Math.min(s.max, Math.max(s.min, +(config[k] + delta).toFixed(4)));
+  setConfig(k, v);
+  return v;
 }
 
 export function resetConfig() {

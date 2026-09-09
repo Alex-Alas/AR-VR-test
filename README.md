@@ -24,7 +24,12 @@ banco construye las tres piezas por su cuenta:
 
 - **Estéreo**: dos render targets con pre-distorsión de barril propia
   (`js/stereo.js`), para cancelar la distorsión en almohadilla de la lente.
-  IPD, FOV, k1, k2 y aberración cromática son ajustables en vivo.
+  Cada ojo se renderiza con el frustum **descentrado hacia la nariz**, para que
+  su eje óptico caiga sobre el centro de la lente y no sobre el centro de su
+  media pantalla: es lo que decide si la imagen fusiona (ver *Que la imagen
+  fusione*, más abajo). Separación de imágenes, IPD, FOV, k1, k2 y aberración
+  cromática son ajustables en vivo, y los tres primeros también desde adentro
+  del visor.
 - **Tracking de cabeza**: 3DOF por `DeviceOrientationEvent` (`js/orientation.js`).
   No hay posición, solo rotación: es lo que da el hardware.
 - **Passthrough**: la cámara trasera dibujada como fondo de los dos ojos.
@@ -39,7 +44,7 @@ Necesita **HTTPS** (o `localhost`): sin eso no hay cámara, ni sensores, ni WebX
 
 **Opción rápida — GitHub Pages**
 
-1. Settings → Pages → Source: *Deploy from a branch* → rama `claude/vr-ar-mvp-testing-5qrbr5`, carpeta `/`.
+1. Settings → Pages → Source: *Deploy from a branch* → rama `main`, carpeta `/`.
 2. Abrir la URL que queda publicada, desde Chrome en Android.
 
 **Opción local**
@@ -52,16 +57,53 @@ adb reverse tcp:8080 tcp:8080    # y abrir http://localhost:8080 en el teléfono
 
 `localhost` cuenta como contexto seguro, así que funciona todo sin certificado.
 
+## Que la imagen fusione
+
+Es el primer problema a resolver, antes que la nitidez y antes que la
+distorsión, y no se arregla con la IPD.
+
+Tu ojo mira a través del **centro de su lente**: lo que ve "de frente" es el
+píxel que está sobre el eje de esa lente, no el píxel del centro de su media
+pantalla. En un teléfono de 140 mm de ancho, los centros de las dos medias
+pantallas están a 70 mm uno del otro, pero las lentes están a 63 mm. Si cada
+imagen se dibuja centrada en su media pantalla, el "adelante" de cada ojo cae
+**3,5 mm más afuera** de donde tiene que caer. A través de una lente de unos
+40 mm de focal, esos 3,5 mm son unos **5° de divergencia por ojo**, y el ojo
+humano tolera bastante menos de 1°: para juntar las dos imágenes tendría que
+mirar hacia afuera, cosa que no hace. Se ve doble, y a los dos minutos duele la
+cabeza.
+
+Por eso el parámetro que hay que ajustar primero es **separación de las dos
+imágenes** (`imgSep`), en % del ancho total de la pantalla:
+
+```
+imgSep % = separación entre los centros de tus lentes ÷ ancho de la pantalla × 100
+         = 63 mm ÷ 140 mm × 100 ≈ 45 %
+```
+
+Si no querés medir nada, se ajusta a ojo desde adentro del visor con
+**👁️ Ajustar dentro del visor**: en el centro hay un blanco con un anillo que
+ven los dos ojos y dos barras cortas, una **naranja arriba que ve solo el ojo
+izquierdo** y una **verde abajo que ve solo el derecho**. Con la separación
+correcta las dos caen en una única línea vertical; si están corridas, tocá
+`◀ juntar` o `separar ▶` (se seleccionan con la mirada) hasta alinearlas.
+
+La **IPD** es otra cosa: solo controla la paralaje entre los dos ojos, o sea la
+sensación de profundidad de los objetos cercanos. No arregla la fusión.
+
 ## Orden recomendado la primera vez
 
 1. **⚙️ Calibración**, con el teléfono en la mano:
+   - Cargá la **separación de las dos imágenes** con la cuenta de arriba, o
+     dejala en 45 % y afinala después dentro del visor.
    - Medí con una regla el **alto físico** del área visible de la pantalla y
      cargalo. Sin ese dato, los grados del modo pantalla son inventados y las
      dos columnas de resultados no se pueden comparar.
-   - Poné tu **IPD** (o probá hasta que las dos imágenes fusionen sin esfuerzo).
-2. **👁️ Ver patrón de ajuste** con el teléfono ya en el visor: subí `k1` hasta
-   que las líneas rectas se vean rectas, y `chroma` hasta que se vayan las
-   franjas de color de los bordes.
+   - Poné tu **IPD**.
+2. **👁️ Ajustar dentro del visor**, con el teléfono ya en el visor:
+   - alineá primero las barras naranja y verde (fusión);
+   - después subí `k1` hasta que las líneas rectas se vean rectas, y `chroma`
+     hasta que se vayan las franjas de color de los bordes.
 3. Corré **Test 1 en pantalla** y después **Test 1 en el visor**. La diferencia
    entre los dos números es el costo real de meter el teléfono en el visor.
 4. **Test 2** primero en pantalla (es más fácil calibrar el FOV de la cámara
@@ -122,6 +164,36 @@ Vale la pena tenerlas a la vista antes de sacar conclusiones:
   salvedad de que ahí hay un solo ensayo por nivel (más sensible a la suerte).
 - **iOS no corre esto.** Safari no tiene WebXR y `DeviceOrientationEvent`
   necesita permiso explícito. Está pensado para Chrome en Android.
+
+## Si el Test 3 no arranca
+
+`The specified session configuration is not supported` es el mensaje único que
+Chrome da para cualquier problema al abrir la sesión: no dice qué feature
+molestó. El banco prueba entonces varias configuraciones, de la más completa a
+la más pobre, y si ninguna entra imprime en la pantalla de inicio qué falló en
+cada intento y con qué error. Lo más común, por orden:
+
+1. **Falta ARCore.** `isSessionSupported('immersive-ar')` devuelve `true` en
+   cualquier Android que *podría* soportarlo, y recién `requestSession()`
+   descubre que "Servicios de Google Play para RA" no está instalado o está
+   viejo. Instalalo o actualizalo desde Play Store y abrilo una vez.
+2. **El teléfono no está certificado por ARCore.** La lista está en
+   [developers.google.com/ar/devices](https://developers.google.com/ar/devices).
+   Muchos de gama de entrada no están, y desde la web no hay nada que hacer.
+3. **Se canceló un diálogo** (permiso de cámara, o la instalación de ARCore).
+   Si el intento tardó segundos antes de fallar, fue esto: el banco lo detecta,
+   no reintenta para no volver a molestarte, y te lo dice.
+4. **Sin HTTPS**, o la página abierta dentro del navegador embebido de otra app.
+
+Si la sesión abre pero el dispositivo no concede todo:
+
+- **sin `hit-test`** el test corre igual, cambiando la puntería: en vez de
+  apuntar a una superficie, se marca el punto **apoyando el borde de arriba del
+  teléfono contra él**. La deriva y la escala se miden igual de bien, porque solo
+  dependen del tracking 6DOF.
+- **sin `dom-overlay`** el DOM es invisible adentro de la sesión, así que la UI
+  se dibuja en 3D y se selecciona con la mirada. La tarea C (escala) queda
+  deshabilitada: necesita escribir la medida real con el teclado.
 
 ## Estructura
 
