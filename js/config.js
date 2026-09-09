@@ -30,11 +30,17 @@ const defaults = Object.fromEntries(SCHEMA.map(s => [s.k, s.val]));
 
 /**
  * `lensSep` (v1 temprana) desplazaba el centro de distorsión hacia afuera desde
- * el centro de cada media pantalla, con 0 = centrado. Es el mismo grado de
- * libertad que `imgSep`, con otro origen: imgSep% = 50 + lensSep.
+ * el centro de cada media pantalla. Es el mismo grado de libertad que `imgSep`,
+ * con otro origen: imgSep% = 50 + lensSep.
+ *
+ * Su valor por defecto era 0, que en el modelo nuevo es 50% — justo el caso que
+ * no fusiona en casi ningún teléfono. Y como cualquier cambio de slider persistía
+ * el objeto entero, ese 0 quedó guardado en gente que nunca lo tocó. Así que 0 se
+ * lee como "nunca se configuró" y cae en el default nuevo; un valor distinto de 0
+ * sí es una decisión y se respeta.
  */
 function migrate(raw) {
-  if (raw.imgSep === undefined && typeof raw.lensSep === 'number') {
+  if (raw.imgSep === undefined && typeof raw.lensSep === 'number' && raw.lensSep !== 0) {
     raw.imgSep = 50 + raw.lensSep;
   }
   delete raw.lensSep;
